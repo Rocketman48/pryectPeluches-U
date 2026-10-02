@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import Modal from './Modal';
 import { ConfirmButton } from './UI';
-import { FileDown, AlertCircle } from 'lucide-react';
+import { FileDown, AlertCircle, ClipboardPaste } from 'lucide-react';
 
 interface ImportModalProps {
   open: boolean;
@@ -9,9 +9,7 @@ interface ImportModalProps {
   onImport: (data: Record<string, unknown>) => void;
 }
 
-const fieldGuide = `// Pega aquí la información del personaje en formato estructurado.
-// Ejemplo JSON:
-{
+const fieldGuide = `{
   "name": "Ignis",
   "title": "El Ardiente",
   "element": "Fuego",
@@ -36,26 +34,81 @@ const fieldGuide = `// Pega aquí la información del personaje en formato estru
   "weaknesses": ["Débil al agua", "Poca defensa física", "Impulsivo"]
 }`;
 
+function extractJson(raw: string): { json: string; error?: string } {
+  let text = raw.trim();
+
+  if (!text) {
+    return { json: '', error: 'No hay texto para importar.' };
+  }
+
+  // Remove single-line comments (// ...) that aren't inside strings
+  text = text.replace(/\/\/.*$/gm, '');
+
+  // Remove trailing commas before } or ] — common in hand-written JSON
+  text = text.replace(/,\s*([}\]])/g, '$1');
+
+  // Convert single-quoted strings to double-quoted (basic)
+  text = text.replace(/'([^']*)'/g, '"$1"');
+
+  // If there's text before the first { or after the last }, trim to just the JSON block
+  const firstBrace = text.indexOf('{');
+  const lastBrace = text.lastIndexOf('}');
+  if (firstBrace === -1 || lastBrace === -1) {
+    return { json: '', error: 'No se encontró un objeto JSON válido (falta { }).' };
+  }
+
+  text = text.substring(firstBrace, lastBrace + 1);
+
+  return { json: text };
+}
+
 export default function ImportModal({ open, onClose, onImport }: ImportModalProps) {
   const [text, setText] = useState('');
   const [error, setError] = useState('');
 
   const handleImport = () => {
     setError('');
+
+    const { json, error: extractError } = extractJson(text);
+    if (extractError) {
+      setError(extractError);
+      return;
+    }
+
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(text);
-      if (typeof parsed !== 'object' || parsed === null) {
-        setError('El JSON debe ser un objeto.');
-        return;
+      parsed = JSON.parse(json);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(`Error de formato JSON: ${msg}`);
+      return;
+    }
+
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      setError('El texto debe ser un objeto JSON (entre llaves { }), no una lista ni un valor simple.');
+      return;
+    }
+
+    const obj = parsed as Record<string, unknown>;
+    if (!obj.name || typeof obj.name !== 'string') {
+      setError('El personaje debe tener al menos un campo "name" (nombre) con texto.');
+      return;
+    }
+
+    onImport(obj);
+    setText('');
+    setError('');
+  };
+
+  const handlePaste = async () => {
+    try {
+      const clipText = await navigator.clipboard.readText();
+      if (clipText) {
+        setText(clipText);
+        setError('');
       }
-      if (!parsed.name || typeof parsed.name !== 'string') {
-        setError('El personaje debe tener al menos un "name" (nombre).');
-        return;
-      }
-      onImport(parsed);
-      setText('');
     } catch {
-      setError('No se pudo interpretar como JSON. Revisa el formato.');
+      // Clipboard read may not be available — ignore silently
     }
   };
 
@@ -90,16 +143,32 @@ export default function ImportModal({ open, onClose, onImport }: ImportModalProp
             automáticamente sin tener que rellenarlos uno por uno.
           </p>
         </div>
+
+        <div className="flex items-center justify-between">
+          <label className="text-sm font-medium text-ink">Datos del personaje</label>
+          <button
+            onClick={handlePaste}
+            className="flex items-center gap-1.5 text-xs font-medium text-gold-dark hover:text-gold transition-colors"
+          >
+            <ClipboardPaste className="w-3.5 h-3.5" />
+            Pegar del portapapeles
+          </button>
+        </div>
+
         <textarea
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setText(e.target.value);
+            setError('');
+          }}
           rows={14}
           placeholder={fieldGuide}
           className="w-full px-4 py-3 rounded-xl border border-border bg-cream-50 text-ink font-mono text-sm focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold transition-all resize-none modal-scroll"
           autoFocus
         />
+
         {error && (
-          <div className="flex items-start gap-2 p-3 rounded-xl bg-red-50 border border-red-200">
+          <div className="flex items-start gap-2 p-3 rounded-xl bg-red-50 border border-red-200 animate-slide-down">
             <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
             <p className="text-sm text-red-700">{error}</p>
           </div>
