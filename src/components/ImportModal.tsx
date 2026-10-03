@@ -34,32 +34,100 @@ const fieldGuide = `{
   "weaknesses": ["Débil al agua", "Poca defensa física", "Impulsivo"]
 }`;
 
-function extractJson(raw: string): { json: string; error?: string } {
+function stripMarkdownFences(raw: string): string {
+  let text = raw.trim();
+  // Remove ```json ... ``` or ``` ... ``` wrapping
+  const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)```/i);
+  if (fenceMatch) {
+    text = fenceMatch[1].trim();
+  }
+  return text;
+}
+
+function removeTrailingCommas(text: string): string {
+  // Remove trailing commas before } or ] (but not inside strings)
+  let result = '';
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+
+    if (escaped) {
+      result += ch;
+      escaped = false;
+      continue;
+    }
+
+    if (ch === '\\') {
+      result += ch;
+      escaped = true;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = !inString;
+      result += ch;
+      continue;
+    }
+
+    if (!inString && ch === ',') {
+      // Look ahead for the next non-whitespace character
+      let j = i + 1;
+      while (j < text.length && /\s/.test(text[j])) j++;
+
+      if (text[j] === '}' || text[j] === ']') {
+        // Skip the comma
+        continue;
+      }
+    }
+
+    result += ch;
+  }
+
+  return result;
+}
+
+function tryParse(raw: string): { data?: Record<string, unknown>; error?: string } {
   let text = raw.trim();
 
   if (!text) {
-    return { json: '', error: 'No hay texto para importar.' };
+    return { error: 'No hay texto para importar. Pega un JSON con los datos del personaje.' };
   }
 
-  // Remove single-line comments (// ...) that aren't inside strings
-  text = text.replace(/\/\/.*$/gm, '');
+  // Step 1: Strip markdown code fences
+  text = stripMarkdownFences(text);
 
-  // Remove trailing commas before } or ] — common in hand-written JSON
-  text = text.replace(/,\s*([}\]])/g, '$1');
-
-  // Convert single-quoted strings to double-quoted (basic)
-  text = text.replace(/'([^']*)'/g, '"$1"');
-
-  // If there's text before the first { or after the last }, trim to just the JSON block
-  const firstBrace = text.indexOf('{');
-  const lastBrace = text.lastIndexOf('}');
-  if (firstBrace === -1 || lastBrace === -1) {
-    return { json: '', error: 'No se encontró un objeto JSON válido (falta { }).' };
+  // Step 2: Try parsing as-is
+  try {
+    const parsed = JSON.parse(text);
+    return validateObject(parsed);
+  } catch {
+    // continue to cleanup
   }
 
-  text = text.substring(firstBrace, lastBrace + 1);
+  // Step 3: Remove trailing commas and try again
+  const cleaned = removeTrailingCommas(text);
+  try {
+    const parsed = JSON.parse(cleaned);
+    return validateObject(parsed);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { error: `No se pudo interpretar el JSON: ${msg}` };
+  }
+}
 
-  return { json: text };
+function validateObject(parsed: unknown): { data?: Record<string, unknown>; error?: string } {
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { error: 'El texto debe ser un objeto JSON (entre llaves { }), no una lista ni un valor simple.' };
+  }
+
+  const obj = parsed as Record<string, unknown>;
+  if (!obj.name || typeof obj.name !== 'string') {
+    return { error: 'El personaje debe tener al menos un campo "name" (nombre) con texto.' };
+  }
+
+  return { data: obj };
 }
 
 export default function ImportModal({ open, onClose, onImport }: ImportModalProps) {
@@ -69,35 +137,17 @@ export default function ImportModal({ open, onClose, onImport }: ImportModalProp
   const handleImport = () => {
     setError('');
 
-    const { json, error: extractError } = extractJson(text);
-    if (extractError) {
-      setError(extractError);
+    const { data, error: parseError } = tryParse(text);
+    if (parseError) {
+      setError(parseError);
       return;
     }
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(json);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setError(`Error de formato JSON: ${msg}`);
-      return;
+    if (data) {
+      onImport(data);
+      setText('');
+      setError('');
     }
-
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      setError('El texto debe ser un objeto JSON (entre llaves { }), no una lista ni un valor simple.');
-      return;
-    }
-
-    const obj = parsed as Record<string, unknown>;
-    if (!obj.name || typeof obj.name !== 'string') {
-      setError('El personaje debe tener al menos un campo "name" (nombre) con texto.');
-      return;
-    }
-
-    onImport(obj);
-    setText('');
-    setError('');
   };
 
   const handlePaste = async () => {
